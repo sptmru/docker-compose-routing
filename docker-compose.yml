@@ -1,0 +1,45 @@
+version: "3.9"
+services:
+  server-one:
+    profiles:
+      - dev
+      - prod
+    build:
+      context: ./server
+    container_name: server-one
+    ports:
+      - mode: ingress
+        target: 3000
+        published: "3000"
+        protocol: tcp
+    restart: always
+    env_file:
+      - ./server/.env
+    networks:
+      nw-default:
+        ipv4_address: 10.1.0.100
+  server-two:
+    profiles:
+      - dev
+      - prod
+    build:
+      context: ./server
+    container_name: server-two
+    ports:
+      - mode: ingress
+        target: 4000
+        published: "4000"
+        protocol: tcp
+    restart: always
+    env_file:
+      - ./server/.env
+    networks:
+      nw-default:
+        ipv4_address: 10.1.0.200
+networks:
+  nw-default:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.1.0.0/24
