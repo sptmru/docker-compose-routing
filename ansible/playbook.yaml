@@ -1,7 +1,29 @@
 - hosts: all
   become: true
   gather_facts: false
+  vars:
+    - node_version: 18
+    - gateway_address: 192.168.0.1
+    - docker_profile: dev
+    - ip_addresses:
+          - key: eth1
+            address: 192.168.0.7
+            table: first
+            table_number: 200
+            docker_ip_address: 10.1.0.100
+          - key: eth2
+            address: 192.168.0.8
+            table: second
+            table_number: 300
+            docker_ip_address: 10.1.0.200
   tasks:
+    - name: Update APT cache
+      remote_user: root
+      shell: apt-get update
+      args:
+        executable: /bin/bash
+      tags:
+        - apt
     - name: Install Docker dependencies
       remote_user: root
       apt:
@@ -16,13 +38,35 @@
         state: latest
         update_cache: true
       tags:
+        - apt
         - docker
+    - name: Install NVM
+      remote_user: root
+      shell: curl https://raw.githubusercontent.com/creationix/nvm/master/install.sh | bash
+      tags:
+        - node
+    - name: Reload .bashrc
+      remote_user: root
+      shell: source /root/.bashrc
+      args:
+        executable: /bin/bash
+      tags:
+        - system
+        - node
+    - name: Install Node.js
+      remote_user: root
+      shell: source /root/.nvm/nvm.sh && nvm install {{ node_version }}
+      args:
+        executable: /bin/bash
+      tags:
+        - node
     - name: Add Docker official GPG key
       remote_user: root
       apt_key:
         url: https://download.docker.com/linux/ubuntu/gpg
         state: present
       tags:
+        - apt
         - docker
     - name: Verify fingerprint
       remote_user: root
@@ -30,6 +74,7 @@
         id: 0EBFCD88
         state: present
       tags:
+        - apt
         - docker
     - name: Add Docker Repository
       remote_user: root
@@ -37,6 +82,7 @@
         repo: deb https://download.docker.com/linux/ubuntu focal stable
         state: present
       tags:
+        - apt
         - docker
     - name: Update apt and install docker-ce
       remote_user: root
@@ -45,6 +91,7 @@
         state: latest
         update_cache: true
       tags:
+        - apt
         - docker
     - name: Install docker-compose
       remote_user: root
@@ -54,3 +101,139 @@
         mode: '755'
       tags:
         - docker
+    - name: Copy docker-compose.yml
+      remote_user: root
+      copy:
+        src: ../docker-compose.yml
+        dest: /root/docker-compose.yml
+      tags:
+        - docker
+    - name: Copy test app
+      remote_user: root
+      copy:
+        src: ../server
+        dest: /root
+      tags:
+        - docker
+    - name: Install NPM packages
+      remote_user: root
+      shell: source /root/.nvm/nvm.sh && npm i
+      args:
+        chdir: /root/server
+        executable: /bin/bash
+    - name: Create .env
+      remote_user: root
+      shell: touch .env
+      args:
+        chdir: /root/server
+        executable: /bin/bash
+    - name: Deploy containers from docker-compose.yml
+      remote_user: root
+      shell: COMPOSE_PROFILES={{ docker_profile }} docker-compose up --build -d
+      args:
+        chdir: /root
+        executable: /bin/bash
+      tags:
+        - docker
+    - name: Configure network interfaces
+      remote_user: root
+      blockinfile:
+        path: /etc/network/interfaces.d/50-cloud-init.cfg
+        block: |
+          auto {{ item.key }}
+          iface {{ item.key }} inet static
+            address {{ item.address }}
+            mtu 1500
+        marker: "# {mark} ANSIBLE MANAGED BLOCK {{ item.key }}"
+        create: yes
+      with_items:
+        "{{ ip_addresses }}"
+      tags:
+        - system
+    - name: Disable auto network config
+      remote_user: root
+      lineinfile:
+        path: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+        line: 'network: {config: disabled}'
+        create: yes
+      tags:
+        - system
+    - name: Restart networking service
+      remote_user: root
+      shell: service networking restart
+      args:
+        executable: /bin/bash
+      tags:
+        - system
+    - name: Create /etc/rc.local
+      remote_user: root
+      lineinfile:
+        path: /etc/rc.local
+        line: '#!/bin/bash'
+        create: yes
+      tags:
+        - system
+    - name: Add execute permissions to /etc/rc.local
+      remote_user: root
+      shell: chmod +x /etc/rc.local
+      args:
+        executable: /bin/bash
+      tags:
+        - system
+    - name: Copy SystemV service config for rc.local
+      remote_user: root
+      copy:
+        src: ../rc-local.service
+        dest: /etc/systemd/system/rc-local.service
+      tags:
+        - system
+    - name: Enable rc.local service
+      remote_user: root
+      shell: systemctl enable rc-local
+      args:
+        executable: /bin/bash
+      tags:
+        - system
+    - name: Add tables to rt_tables
+      lineinfile:
+        path: /etc/iproute2/rt_tables
+        line: "{{ item.table_number }} {{ item.table }}"
+        create: yes
+      with_items:
+        "{{ ip_addresses }}"
+      tags:
+        - system
+    - name: Add routes to /etc/rc.local
+      remote_user: root
+      lineinfile:
+        path: /etc/rc.local
+        line: ip route add default via {{ gateway_address }} dev {{ item.key }} table {{ item.table }}
+        create: yes
+      with_items: "{{ ip_addresses }}"
+      tags:
+        - system
+    - name: Add rules to /etc/rc.local
+      remote_user: root
+      lineinfile:
+        path: /etc/rc.local
+        line: ip rule add from {{ item.docker_ip_address }} table {{ item.table }}
+        create: yes
+      with_items: "{{ ip_addresses }}"
+      tags:
+        - system
+    - name: Add iptables rules to /etc/rc.local
+      remote_user: root
+      lineinfile:
+        path: /etc/rc.local
+        line: iptables -t nat -A POSTROUTING -s {{ item.docker_ip_address }} -j SNAT --to-source {{ item.address }}
+        create: yes
+      with_items: "{{ ip_addresses }}"
+      tags:
+        - system
+    - name: Run /etc/rc.local
+      remote_user: root
+      shell: source /etc/rc.local
+      args:
+        executable: /bin/bash
+      tags:
+        - system
